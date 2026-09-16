@@ -7,7 +7,11 @@
 
     <key>ProgramArguments</key>
     <array>
-        <!-- claude 執行檔路徑，通常是 /usr/local/bin/claude 或 ~/.npm-global/bin/claude -->
+        <!-- launchd 沒有 TTY；script 提供 pseudo-TTY，避免 Claude 誤切成 --print 後退出 -->
+        <string>/usr/bin/script</string>
+        <string>-q</string>
+        <string>/dev/null</string>
+        <!-- claude 執行檔路徑 -->
         <string>/PATH/TO/claude</string>
         <!-- 填入你要固定的 session id（用 claude --list-sessions 查） -->
         <string>--resume</string>
@@ -38,5 +42,12 @@
     <!-- 工作目錄（替換 YOUR_HOME） -->
     <key>WorkingDirectory</key>
     <string>/YOUR_HOME</string>
+
+    <!-- 必須包含 Bun，否則 telegram plugin 會找不到 bun -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/YOUR_HOME/.bun/bin:/YOUR_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
 </dict>
 </plist>
