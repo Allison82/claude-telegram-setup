@@ -332,6 +332,117 @@ curl -s "https://api.telegram.org/bot${TOKEN}/sendMessage" \
 
 ---
 
+## 十四、重開機後自動接回「同一個對話」（2026-09-21 新增）
+
+### 1. 開機自動啟動的條件
+
+- LaunchAgent 屬於**使用者登入後**才載入（`RunAtLoad` + `KeepAlive`）。Mac 停在登入畫面時**不會**啟動；請先登入你的帳號（或設定自動登入）。
+- 登入後等約 30 秒（`ThrottleInterval`），用手機傳一則新訊息測試；有回覆就是接上了。
+- plist 的 `PATH` 必須包含 Bun（`~/.bun/bin`）與 `claude` 所在資料夾，否則 telegram plugin 找不到 `bun`。
+- 常駐用的工作資料夾必須**先手動開一次 Claude 並選擇「信任此資料夾」**，否則 launchd 帶起來的 session 會卡在信任提示。
+
+### 2. 陷阱：`--resume` 每次都會分叉出新的 session id
+
+**實測現象**：plist 寫死 `claude --resume <舊 id>`，launchd 帶起 Claude 之後，後續所有對話都寫進「新的 session id」的 `~/.claude/projects/<專案路徑>/<新 id>.jsonl`；舊 id 的檔案就停在啟動當下。
+
+**後果**：如果 plist 一直寫著最初那個 id，**下次重開機會回到很久以前的對話狀態**，看不到中間累積的所有工作與上下文。
+
+**判斷方式**（唯讀）：
+
+```bash
+# 目前 launchd 那個 process 用的是哪個 id（開機時的 id）
+ps -o pid,lstart,command -p $(launchctl print gui/$(id -u)/com.你的帳號.claude-telegram-channel | awk '/pid =/{print $3}')
+
+# 專案資料夾裡，哪個 .jsonl 最近還在被寫入（＝目前對話的真正 id）
+ls -lt ~/.claude/projects/-Users-你的帳號/*.jsonl | head -5
+```
+
+若最新被寫入的 `.jsonl` 檔名和 plist 裡的 id 不同，重開機後就會接錯對話。
+
+### 3. 解法 A（最簡單）：重開機前把 plist 的 id 改成最新的
+
+```bash
+PLIST=~/Library/LaunchAgents/com.你的帳號.claude-telegram-channel.plist
+cp "$PLIST" "$PLIST.bak"                                  # 先備份
+/usr/libexec/PlistBuddy -c "Print :ProgramArguments" "$PLIST"   # 確認 --resume 後面的索引（通常是 :5）
+/usr/libexec/PlistBuddy -c "Set :ProgramArguments:5 <最新的 session id>" "$PLIST"
+plutil -lint "$PLIST"                                     # 語法檢查要回 OK
+```
+
+- 這只修改檔案，**不要**在對話還在進行時 `bootout`／`kickstart`（會中斷目前的 session）。重開機後 launchd 會自動讀新的 plist。
+- 缺點：因為每次接回都會再分叉，**每次重開機前都要重做一次**。
+
+### 4. 解法 B（一勞永逸）：用啟動腳本自動接回「最新的 session」
+
+見 `templates/start_telegram_channel.sh` 與 `templates/com.user.claude-telegram-channel.wrapper.plist`：
+
+1. 把腳本複製到 `~/.claude/channels/telegram/start_telegram_channel.sh` 並 `chmod +x`。
+2. plist 的 `ProgramArguments` 改成 `script -q /dev/null <腳本路徑>`（不用再寫 `--resume`）。
+3. 腳本每次啟動時：找專案資料夾裡最近被寫入的 `.jsonl` → 用它的檔名當 session id → `exec claude --resume <id> --channels ... --dangerously-skip-permissions`。
+4. 需要強制固定某個 session 時，建立 `~/.claude/channels/telegram/PINNED_SESSION`（內容放 id），腳本會優先使用它。
+5. 改完 plist 後才需要 `bootout` 再 `bootstrap`（見第十一節）。
+
+**注意**：如果你同時會在**同一個資料夾**開別的互動式 Claude session，「最新被寫入」可能不是 Telegram 那個；這種情況請用 `PINNED_SESSION` 固定，或讓 Telegram 用專屬工作資料夾。
+
+### 5. 重開機前／後檢查清單
+
+| 時機 | 動作 |
+|------|------|
+| 重開機前 | 確認最新的 session id（第 2 節）→ 解法 A 改 plist，或確認已採用解法 B |
+| 重開機前 | 確認 plist 語法：`plutil -lint <plist>` |
+| 重開機後 | 先登入使用者帳號，等約 30 秒 |
+| 重開機後 | 手機傳「？」測試；沒回就 `launchctl print gui/$(id -u)/<label> \| grep -E "state\|pid\|last exit"` |
+| 重開機後 | 進 `/mcp` 確認 Telegram 與其他連接器都是 connected；不是就選 Reconnect（見下節） |
+| 重開機後 | Chrome 擴充（若使用 claude-in-chrome）需要 Chrome 已開啟並登入 |
+
+---
+
+## 十五、連接器（MCP）重連與「連錯工作區」問題（2026-09-21 新增）
+
+### 1. 基本重連
+
+在 Claude Code 輸入 `/mcp` → 選擇有問題的伺服器（例如 `claude.ai Notion`、`plugin:telegram:telegram`）→ **Reconnect / Authenticate**。成功會顯示 `Reconnected to ...`。
+
+### 2. 症狀：讀得到 A 工作區、讀不到 B 工作區（Notion 為例）
+
+- 用 API 讀 B 工作區的頁面，回 `object_not_found`（404），訊息提到「check that you have access and that you're authenticated to the correct workspace」。
+- 用 Chrome 網頁版能正常打開該頁 → 代表**你的帳號有權限，但這個連接器授權在另一個工作區**（一個連接器授權綁定一個工作區）。
+- 只按 `/mcp` 的 Reconnect **不一定會出現「選工作區」畫面**，重連後仍是舊工作區。
+- 解法：到 claude.ai 的「設定 → 連接器」，把該連接器**中斷連線**後重新連線，在授權頁明確選擇目標工作區；回終端機 `/mcp` 再 Reconnect。
+- 在對話中新增的授權，**目前這個 session 不一定會即時吃到**；不行就重開 session。
+- 除錯順序：① 用網頁版確認頁面存在 → ② `notion-search` 搜該工作區的頁面標題 → ③ 搜不到＝連錯工作區。
+
+---
+
+## 十六、延伸：把 Telegram 當「入口」的自動化管線（2026-09-21 新增）
+
+Telegram 已接上 Claude Code 之後，可以把「傳一個網址／檔案」當成觸發條件，讓 Claude 自動處理並回報。以下是實測可行的組合（全部可在自己的 Mac 上跑，不需要額外雲端服務）：
+
+```
+Telegram 傳網址 ─→ 判斷來源 ─→ 抓內容 ─→ 轉文字 ─→ 摘要分類 ─→ 寫入 Notion ─→ Telegram 回報連結與摘要
+```
+
+| 步驟 | 工具 | 備註 |
+|------|------|------|
+| 一般網頁 / GitHub / Threads | Claude 內建 WebFetch | 無法讀的登入頁改用 Chrome 擴充 |
+| 影片（YouTube、小紅書、TikTok…） | `yt-dlp` | 小紅書短連結會被導到登入頁，需先取得**含 `xsec_token` 的完整網址**（`curl -s -o /dev/null -w '%{redirect_url}' <短連結>`）再丟給 yt-dlp |
+| Instagram Reel | `instaloader`（免登入） | 產出 `-<shortcode>/` 資料夾（mp4、jpg、caption txt） |
+| 語音轉文字 | `mlx-whisper`（Apple Silicon 本機） | 模型 `whisper-large-v3-turbo`；`--output-dir` 請指到**另一個資料夾**，避免蓋掉 caption 的同名 txt |
+| 短影片名稱只在畫面上 | `ffmpeg -ss <秒> -frames:v 1` 截圖再讓 Claude 看圖 | 資訊圖表型短片口播常不念名稱 |
+| 寫入 Notion | Notion MCP 連接器 | 見第十五節；欄位與資料庫 ID 寫進對應 skill |
+| 回報 | telegram `reply` tool | 完成後另發一則新訊息（編輯訊息不會推播） |
+
+**把流程寫成 skill**：在 `~/.claude/skills/<名稱>/SKILL.md` 寫下觸發條件、步驟與資料庫欄位規則，Claude 每次收到符合條件的訊息就會照做，不用每次重新說明。
+
+**安裝位置提醒**：在系統 Python 3.9 上用 `pip3 install --user` 安裝的指令位於 `~/Library/Python/3.9/bin`，要加進 PATH 或用完整路徑；系統 Python 太舊時，`yt-dlp` 可能停在舊版而無法讀取新的 YouTube 頁面（錯誤如 `The page needs to be reloaded`），需要升級 Python 或改用其他來源。
+
+**注意事項**
+- 影片內容摘要要註明「已用逐字稿核對」或「未核對」；語音辨識常把英文名詞聽錯，需依上下文修正。
+- 廣告／合作推廣、留言索取型（導流）內容要在備註標明。
+- 暫存的影片與音檔處理完要刪除。
+
+---
+
 *建立日期：2026-05-16*
-*最後更新：2026-08-23（新增 launchd 常駐架構、重複 process 排查 SOP）*
+*最後更新：2026-09-21（新增：重開機自動接回同一個對話與 session id 分叉陷阱、啟動腳本模板、連接器重連與連錯工作區、Telegram 入口自動化管線）*
 *適用版本：telegram plugin v0.0.6/v0.0.7，Claude Code CLI*
