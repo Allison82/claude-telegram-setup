@@ -341,11 +341,13 @@ curl -s "https://api.telegram.org/bot${TOKEN}/sendMessage" \
 - plist 的 `PATH` 必須包含 Bun（`~/.bun/bin`）與 `claude` 所在資料夾，否則 telegram plugin 找不到 `bun`。
 - 常駐用的工作資料夾必須**先手動開一次 Claude 並選擇「信任此資料夾」**，否則 launchd 帶起來的 session 會卡在信任提示。
 
-### 2. 陷阱：`--resume` 每次都會分叉出新的 session id
+### 2. 陷阱：session id 可能在長時間運作中換新，plist 寫死的舊 id 會過期
 
-**實測現象**：plist 寫死 `claude --resume <舊 id>`，launchd 帶起 Claude 之後，後續所有對話都寫進「新的 session id」的 `~/.claude/projects/<專案路徑>/<新 id>.jsonl`；舊 id 的檔案就停在啟動當下。
+**實測現象**：launchd 帶起 `claude --resume <A>` 的 process 持續運作數天後，實際寫入的 session 檔已變成另一個 id `<B>`（`<B>.jsonl` 的第一筆事件就是後來收到的訊息，而 `<A>.jsonl` 停在很久以前）。推測與上下文重置／壓縮有關，**確切觸發條件我沒有確認**。
 
-**後果**：如果 plist 一直寫著最初那個 id，**下次重開機會回到很久以前的對話狀態**，看不到中間累積的所有工作與上下文。
+**後果**：重開機時 plist 仍寫著 `<A>`，就會回到 `<A>` 的舊狀態，看不到之後累積的工作與上下文。
+
+**補充**：用 `--resume <B>` 重新啟動後，實測仍沿用同一個 id `<B>`（沒有再換）。所以「每次 resume 都會分叉新 id」這個說法**不成立**；重點是「id 會在運作期間某些時刻換新」，因此不要假設 plist 裡的 id 永遠是最新的。
 
 **判斷方式**（唯讀）：
 
@@ -370,7 +372,7 @@ plutil -lint "$PLIST"                                     # 語法檢查要回 O
 ```
 
 - 這只修改檔案，**不要**在對話還在進行時 `bootout`／`kickstart`（會中斷目前的 session）。重開機後 launchd 會自動讀新的 plist。
-- 缺點：因為每次接回都會再分叉，**每次重開機前都要重做一次**。
+- 缺點：只要對話期間 id 又換新，**重開機前就要再檢查／更新一次**。
 
 ### 4. 解法 B（一勞永逸）：用啟動腳本自動接回「最新的 session」
 
@@ -444,5 +446,5 @@ Telegram 傳網址 ─→ 判斷來源 ─→ 抓內容 ─→ 轉文字 ─→ 
 ---
 
 *建立日期：2026-05-16*
-*最後更新：2026-09-21（新增：重開機自動接回同一個對話與 session id 分叉陷阱、啟動腳本模板、連接器重連與連錯工作區、Telegram 入口自動化管線）*
+*最後更新：2026-09-21（新增：重開機自動接回同一個對話與 session id 會換新的陷阱、啟動腳本模板、連接器重連與連錯工作區、Telegram 入口自動化管線）*
 *適用版本：telegram plugin v0.0.6/v0.0.7，Claude Code CLI*

@@ -1,10 +1,10 @@
 #!/bin/zsh
 # 啟動 Claude Code 的 Telegram channel，並「接回最新的 session」。
 #
-# 為什麼需要它：實測 `claude --resume <id>` 每次啟動都會「分叉」出一個新的 session id，
-# 之後的對話都寫進新 id 的 .jsonl，舊 id 的檔案就停在那一刻。
-# 如果 plist 永遠寫死同一個舊 id，重開機後就會回到「很久以前」的對話狀態。
-# 這支腳本每次啟動時自動挑選最新的 session 接回，就不用每次重開機前手動改 plist。
+# 為什麼需要它：實測 launchd 常駐的 Claude 運作數天後，實際寫入的 session 檔可能已換成
+# 另一個 id（舊 id 的 .jsonl 停在很久以前）。如果 plist 永遠寫死同一個舊 id，
+# 重開機後就會回到「很久以前」的對話狀態。
+# 這支腳本每次啟動時自動挑選最近被寫入的 session 接回，就不用手動更新 plist。
 #
 # 用法：把 launchd plist 的 ProgramArguments 改成
 #   /usr/bin/script -q /dev/null /YOUR_HOME/.claude/channels/telegram/start_telegram_channel.sh
