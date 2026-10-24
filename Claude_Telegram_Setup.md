@@ -298,7 +298,7 @@ curl -s "https://api.telegram.org/bot${TOKEN}/getWebhookInfo"
 # 主動推播一則自檢訊息，先確認「bot → 人」這個方向沒問題
 TOKEN=$(grep -o 'TELEGRAM_BOT_TOKEN=.*' ~/.claude/channels/telegram/.env | cut -d= -f2)
 curl -s "https://api.telegram.org/bot${TOKEN}/sendMessage" \
-  -d chat_id=123456789 \
+  -d chat_id=YOUR_CHAT_ID \
   -d text="系統自檢：請回覆測試"
 ```
 
