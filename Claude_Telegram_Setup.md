@@ -445,6 +445,156 @@ Telegram 傳網址 ─→ 判斷來源 ─→ 抓內容 ─→ 轉文字 ─→ 
 
 ---
 
+## 十七、2026-10 實戰修復紀錄：bot 沒回應的新原因與自動修復（2026-10-29 新增）
+
+這一個月遇到的「Telegram 沒回應」，大部分都**不是**斷線：process 在跑、登入沒過期、log 也沒錯誤，但就是不回。以下照「症狀 → 原因 → 修法 → 自動化」整理。對應的腳本放在 `templates/watchdog/`、`templates/xhs_guard/`。
+
+### 17-1 先分辨：bot 有沒有「收到」
+
+在終端機設定 `ackReaction`，bot 一收到訊息就先按 👀：
+
+```
+/telegram:access set ackReaction 👀
+```
+
+| 手機上看到的 | 代表 | 往哪查 |
+|---|---|---|
+| 沒有 👀 | 訊息根本沒進到 bot | 17-2 搶線、第八／十二節的斷線排查 |
+| 有 👀 但一直不回 | 連線正常，Claude 本身卡住 | 17-3 換模型選單、登入過期、被安全機制擋 |
+
+### 17-2 被另一個 Claude 視窗「搶線」
+
+**症狀**：完全沒回應。`launchctl print` 是 `running`，登入沒過期，舊 watchdog 也沒報警。
+
+**原因**：在終端機開了另一個 `claude`（例如 `claude --chrome --resume`），那個互動視窗也載入了 telegram 外掛，起了自己的 `bun server.ts`，把 bot 的 long polling 搶走。launchd 那條底下就沒有 bun 了。舊 watchdog 只數「全機有幾個 bun」，數到的剛好是搶線的那個，所以沒發現。
+
+**診斷**：
+
+```bash
+ps -eo pid,ppid,etime,command | grep -E "bun server.ts|channels plugin:telegram" | grep -v grep
+```
+
+看 `bun server.ts` 的上層是不是 launchd 那條 `claude --resume … --channels …`。上層是互動終端機的 `claude`，就是被搶線了。
+
+**修法**：
+
+```bash
+pkill -f "bun server.ts"
+launchctl kickstart -k gui/$(id -u)/com.YOUR_USERNAME.claude-telegram-channel
+```
+
+等 30 秒，傳一則訊息測試。
+
+**自動化**：`templates/watchdog/check_and_reconnect.sh` 每 2 分鐘檢查一次，只承認「launchd job pid 的子孫」裡的 bun。其他來源的 bun 一律關掉；launchd 那條沒有 bun 就 `kickstart -k`，並用 Bot API 通知使用者（一小時最多一次）。
+
+**教訓**
+- 關 process 要看**執行檔名稱**（`ps -o comm=`），不要看指令文字。測試時，一個指令文字裡剛好含 `bun server.ts` 的 shell 就被誤關了。
+- 在終端機工作時要傳 TG，**直接呼叫 Bot API `sendMessage`**，不要在終端機載入 telegram 外掛：
+
+```bash
+curl -s "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+  --data-urlencode "chat_id=${CHAT_ID}" --data-urlencode "text=訊息內容"
+```
+
+### 17-3 卡在「要不要換模型」選單
+
+**症狀**：有 👀，但之後每則都不回，可以一直卡好幾個小時。
+
+**原因**：某則回覆被模型的安全機制擋下（不一定是真的有問題，偶爾會誤判），Claude Code 在 bot 的終端畫面跳出「Model switch … Switch to 另一個模型?」選單等人選。bot 跑在 launchd 背景，沒人看得到這個畫面。這種卡法也**不會寫成 transcript 裡的錯誤**，所以 17-5 的錯誤偵測抓不到。
+
+**診斷**：看 launchd 的畫面輸出（去掉控制碼）：
+
+```bash
+tail -c 3000 ~/.claude/channels/telegram/launchd.out.log \
+  | LC_ALL=C sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' | strings | tail -15
+```
+
+看到 `Model switch`、`safeguards flagged this session` 就是這個。
+
+**修法**
+- 用原模型 `kickstart -k` **沒用**：`--resume` 之後會馬上又跳出同一個選單。
+- 要把 plist 的 `--model` 改成選單建議的模型，再 `bootout` ＋ `bootstrap`。改之前先確認那個模型可以用：
+
+```bash
+claude -p --model <選單建議的模型> --no-session-persistence "只回覆 OK"
+```
+
+**自動化**：`templates/watchdog/model_switch_guard.py`（由 `check_and_reconnect.sh` 呼叫）
+1. 在 `launchd.out.log` 的新內容裡看到選單 → 用 TG 通知使用者（人在電腦前可以自己選）。
+2. 2 分鐘後 transcript 裡還是沒有 bot 的新回覆 → 自動改 `--model`、重新載入，再通知使用者重傳訊息。
+3. 處理過後 30 分鐘內不再動作，避免重啟循環。
+
+**注意**
+- bot 卡住時收不到 TG，所以**沒辦法用 TG 回答這個選單**，只能在電腦前選，或等它自動處理。
+- 判斷「卡住」不能只看 transcript 的修改時間：卡住時進來的訊息一樣會寫進 transcript。要看有沒有 **assistant** 的新內容。
+- 換模型後 bot 會長期停在新模型，要換回來就把 `--model` 改回去，但同一個 session 可能又被擋。
+
+### 17-4 群組裡「網頁可以、影片不行」
+
+群組的安全紅線（第十節）是「群組訊息可以讀、可以回，但**不能執行本機程式**」，避免群組裡任何人都能透過 bot 操作你的電腦。實際效果：
+
+| 在群組 tag bot 傳的內容 | 結果 | 原因 |
+|---|---|---|
+| 新聞、文章、一般網頁 | ✅ 可以分析 | 用內建 WebFetch 讀網頁，不用跑本機程式 |
+| IG、小紅書、YouTube 影片 | ❌ 不處理 | 要在本機跑下載和轉文字的程式 |
+
+這條規則**不分是誰傳的**，連 bot 主人自己在群組傳也一樣。要分析影片就把連結轉傳到私訊。如果想放行，可以改成「只有主人的 Telegram 帳號 ID 才能在群組觸發影片流程」，但要自己評估風險。
+
+### 17-5 登入過期、被安全機制擋（10-16 ～ 10-20）
+
+這部分的完整排查和 `auto_repair.py` 說明在 [claude-telegram-bridge](https://github.com/Allison82/claude-telegram-bridge) 的 `docs/TROUBLESHOOTING_LOG.md`。重點：
+- **`Login expired`** 只會出現在 `launchd.out.log` 的畫面裡，不在 `err.log`。修法是在任一個互動視窗 `/login`，再 `kickstart -k`。
+- **每則訊息都被擋**（`can't help with this. Start a new session`）：先用 `--fork-session` 測試換模型能不能過（保留記憶），全部失敗才換新 session。
+- `auto_repair.py` 讀的是 transcript 裡結構化的 API 錯誤列，不看畫面，因為 `--resume` 重開時畫面會把舊錯誤重畫一遍，看畫面會誤判。
+
+### 17-6 小紅書改成要登入才能看（2026-10-24 起）
+
+**症狀**：第十六節的 `yt-dlp` 流程開始失敗，被導去登入頁。小紅書單篇內容現在要登入才看得到。
+
+**做法：給 bot 一個「專用登入」**
+- 用 Firefox 開一個**獨立的設定檔資料夾**只登小紅書，`yt-dlp` 從這個資料夾讀 cookies：
+
+```bash
+FP="$HOME/.claude/channels/telegram/xhs_guard/profile"
+yt-dlp --cookies-from-browser "firefox:$FP" -f b --write-info-json -o v.mp4 "<含 xsec_token 的完整網址>"
+```
+
+- **不要用 Chrome 的 cookies**（裡面有 Google、網銀等登入），也不要跟自己平常瀏覽的設定檔混用（自動化工具 puppeteer 會改掉瀏覽器的安全設定）。
+- **圖文筆記**（轉址網址是 `type=normal`）yt-dlp 會失敗，改抓網頁 HTML，解析 `window.__INITIAL_STATE__` 裡的 `note.noteDetailMap`。要用 Node 解析，不要用 Python `json.loads`：裡面有 `undefined`，會解析失敗。圖片下載要帶 `Referer: https://www.xiaohongshu.com/`。
+- 短連結展開要用 GET：`curl -s -o /dev/null -w "%{redirect_url}" <短連結>`，`curl -I` 會回 404。
+
+**登入過期自動處理**：`templates/xhs_guard/`
+- `xhs_guard.js status`：印出 `logged_in`／`logged_out`。判斷方式是帶 cookies 抓首頁，看有沒有 `"loggedIn":true`。
+- `xhs_guard.js check`：由 launchd 每天跑（`com.user.xhs-guard.plist`）。還登入著就開一次首頁保持登入；登出了就走 `login`。
+- `xhs_guard.js login`：傳 TG 提醒「回電腦點兩下桌面『小紅書機器人登入』，用手機 App 掃螢幕上的 QR code」，然後在背景每 30 秒檢查一次，最多 3 小時，登入成功就自動通知。
+- `xhs_guard.js qr`（備用）：把 QR code 截圖傳到 TG。**實測手機 App 不一定能從相簿掃**，只在旁邊有另一台裝置能顯示 QR code 時才用。
+
+**踩過的坑**
+- 背景等待的迴圈裡，網路一時不通會讓 `fetch` 丟例外，整個等待流程直接結束，登入成功也不會通知。檢查登入的函式要自己接住錯誤、當成「這輪還沒登入」。
+- 桌面上兩個長得很像的捷徑（自己瀏覽用的、bot 登入用的）很容易點錯，**登在自己的瀏覽器裡 bot 一樣讀不到**。分辨方法：bot 的視窗打開就是登出狀態、直接跳 QR code。
+- 不要在背景監看指令的文字裡放 `xhs_guard.js login` 這串字：bot 用 `pkill -f` 關舊流程時會連監看指令一起關掉。
+
+### 17-7 Google 地圖收藏清單：沒辦法自動加入
+
+**需求**：傳 Google 地圖店家網址，bot 把店加進自己的地圖收藏清單（例如「想去吃的店」）。
+
+**結論：目前沒辦法可靠地自動完成。**
+
+| 可能原因 | 實測結果 |
+|---|---|
+| 有沒有寫入清單的 API | **沒有**。Places API 只能查店家，不能把店加進私人收藏清單。存進 Google 試算表不等於存進地圖 |
+| 瀏覽器沒登入／帳號錯 | 不是：儲存選單能正常列出自己的清單和地點數 |
+| 清單沒有編輯權限 | 不是：清單是自己建的，第一次有成功過 |
+| **自動點擊沒生效** | **是**：用元素參照點、用螢幕座標點「儲存」，選單都不出現；清單頁的「新增地點」搜尋框也叫不出來 |
+
+**最後採用的流程**
+1. 展開網址，確認店名和地址。不只一家（同品牌多分店）就先列候選問使用者，不要猜。
+2. 回傳店名、地址、評分和店家連結，請使用者在手機上點「儲存」→ 勾清單，兩下就好。
+3. **不要回報「已加入」**，除非重新打開清單頁確認地點數增加、店名也出現了。
+
+---
+
 *建立日期：2026-05-16*
-*最後更新：2026-09-21（新增：重開機自動接回同一個對話與 session id 會換新的陷阱、啟動腳本模板、連接器重連與連錯工作區、Telegram 入口自動化管線）*
+*最後更新：2026-10-29（新增第十七節：搶線、換模型選單卡住、群組限制、小紅書專用登入、Google 地圖清單限制，與對應的自動修復腳本）*
+*前次更新：2026-09-21（重開機自動接回同一個對話與 session id 會換新的陷阱、啟動腳本模板、連接器重連與連錯工作區、Telegram 入口自動化管線）*
 *適用版本：telegram plugin v0.0.6/v0.0.7，Claude Code CLI*

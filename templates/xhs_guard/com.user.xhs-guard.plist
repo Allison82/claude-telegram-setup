@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 每天 09:30 檢查機器人的小紅書登入：還登入著就開一次首頁保持登入，登出了就傳 TG 提醒。
+     把 YOUR_USERNAME 換成你的帳號名稱，node 路徑用 `which node` 確認。
+     放到 ~/Library/LaunchAgents/ 後：launchctl bootstrap gui/$(id -u) <這個檔案> -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.user.xhs-guard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/YOUR_USERNAME/.claude/channels/telegram/xhs_guard/xhs_guard.js</string>
+    <string>check</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/YOUR_USERNAME/.claude/channels/telegram/xhs_guard</string>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>30</integer></dict>
+</dict>
+</plist>
