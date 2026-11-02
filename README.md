@@ -34,6 +34,7 @@
 | `templates/watchdog/check_and_reconnect.sh` | 每 2 分鐘的健康檢查：斷線重連、**偵測搶線**（別的 Claude 視窗搶走 bot 連線） |
 | `templates/watchdog/auto_repair.py` | 登入過期、被安全機制擋、對話太長時自動修復 |
 | `templates/watchdog/model_switch_guard.py` | bot 卡在「要不要換模型」選單：先通知，2 分鐘沒處理就自動換模型 |
+| `templates/watchdog/reply_guard.py` | bot 回覆了卻沒呼叫 reply 工具：自動把那段回覆補傳到 TG |
 | `templates/xhs_guard/` | 小紅書專用登入：每日檢查、過期提醒、桌面登入捷徑、launchd 排程 |
 
 ## 快速開始

@@ -148,3 +148,6 @@ LAUNCHD_LABEL="$LAUNCHD_LABEL" /usr/bin/python3 "$BASE_DIR/auto_repair.py" >> "$
 
 # Stuck on the "Model switch" dialog: notify, then auto-switch after 2 minutes
 LAUNCHD_LABEL="$LAUNCHD_LABEL" /usr/bin/python3 "$BASE_DIR/model_switch_guard.py" >> "$BASE_DIR/auto_repair.log" 2>&1
+
+# Bot answered but never called the reply tool: forward its text to TG after 3 idle minutes
+LAUNCHD_LABEL="$LAUNCHD_LABEL" /usr/bin/python3 "$BASE_DIR/reply_guard.py" >> "$BASE_DIR/auto_repair.log" 2>&1
